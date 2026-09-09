@@ -1,0 +1,207 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: iot-platform
+data:
+  nginx.conf: |
+    worker_processes auto;
+    worker_rlimit_nofile 65536;
+    events {
+      worker_connections 16384;
+      use epoll;
+      multi_accept on;
+    }
+
+    http {
+      include       /etc/nginx/mime.types;
+      default_type  application/octet-stream;
+
+      # Logging
+      log_format json '{"time":"$time_iso8601","method":"$request_method",'
+                      '"uri":"$request_uri","status":$status,'
+                      '"upstream":"$upstream_addr","rt":"$request_time"}';
+      access_log /var/log/nginx/access.log json;
+      error_log  /var/log/nginx/error.log warn;
+
+      # Performance
+      sendfile        on;
+      tcp_nopush      on;
+      tcp_nodelay     on;
+      keepalive_timeout 65;
+      gzip on;
+      gzip_types text/plain text/css application/json application/javascript;
+
+      # Rate limiting — anti DDoS
+      limit_req_zone $binary_remote_addr zone=api:10m rate=100000r/s;
+      limit_req_zone $binary_remote_addr zone=esp:10m  rate=100000r/s;
+
+      upstream api_backend {
+        least_conn;                    # Load balancing bazat pe conexiuni active
+        server api:3001 max_fails=3 fail_timeout=30s;
+        keepalive 128;
+      }
+
+      server {
+        listen 80;
+        server_name _;
+
+        # Redirect HTTP → HTTPS in productie
+        # return 301 https://$host$request_uri;
+
+        # Health check pentru load balancer
+        location /health {
+          access_log off;
+          return 200 '{"status":"ok"}';
+          add_header Content-Type application/json;
+        }
+
+        # API routes — catre API service
+        location /api/ {
+          limit_req zone=api burst=5000 nodelay;
+
+          proxy_pass         http://api_backend;
+          proxy_http_version 1.1;
+          proxy_set_header   Host              $host;
+          proxy_set_header   X-Real-IP         $remote_addr;
+          proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+          proxy_set_header   X-Forwarded-Proto $scheme;
+          proxy_set_header   Connection        "";
+          proxy_read_timeout 30s;
+          proxy_connect_timeout 5s;
+
+          # CORS headers pentru ESP32 si browser
+          add_header Access-Control-Allow-Origin  "$http_origin" always;
+          add_header Access-Control-Allow-Methods "GET,POST,PUT,PATCH,DELETE,OPTIONS" always;
+          add_header Access-Control-Allow-Headers "Authorization,Content-Type,X-API-Key" always;
+          if ($request_method = OPTIONS) { return 204; }
+        }
+
+        # ESP32 telemetry endpoint — rate limit separat mai permisiv
+        location /api/telemetry {
+          limit_req zone=esp burst=5000 nodelay;
+          proxy_pass http://api_backend;
+          proxy_http_version 1.1;
+          proxy_set_header Host            $host;
+          proxy_set_header X-Real-IP       $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header Connection      "";
+          proxy_read_timeout 10s;
+        }
+
+        # WebSocket pentru live dashboard
+        location /ws {
+          proxy_pass         http://api_backend;
+          proxy_http_version 1.1;
+          proxy_set_header   Upgrade    $http_upgrade;
+          proxy_set_header   Connection "Upgrade";
+          proxy_set_header   Host       $host;
+          proxy_read_timeout 3600s;
+          proxy_send_timeout 3600s;
+        }
+
+        # React SPA — static files
+        location / {
+          root /usr/share/nginx/html;
+          try_files $uri $uri/ /index.html;
+          expires 1y;
+          add_header Cache-Control "public, immutable";
+
+          # Index.html nu se cacheza (contine hash-uri la assets)
+          location = /index.html {
+            expires -1;
+            add_header Cache-Control "no-cache, no-store, must-revalidate";
+          }
+        }
+      }
+    }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: iot-platform
+  labels:
+    app: nginx
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+        - name: nginx
+          image: iot-nginx:latest   # Nginx + React build
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu:    "500m"
+            limits:
+              memory: "4Gi"
+              cpu:    "6000m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds:       10
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nginx/nginx.conf
+              subPath:   nginx.conf
+      volumes:
+        - name: config
+          configMap:
+            name: nginx-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+  namespace: iot-platform
+spec:
+  selector:
+    app: nginx
+  ports:
+    - name: http
+      port:       80
+      targetPort: 80
+  type: LoadBalancer   # Pe cloud (AWS/GCP/Azure) creeaza un LB extern
+
+---
+# Ingress cu TLS — pentru productie cu cert-manager
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: iot-ingress
+  namespace: iot-platform
+  annotations:
+    kubernetes.io/ingress.class:              "nginx"
+    cert-manager.io/cluster-issuer:          "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  tls:
+    - hosts:
+        - your-domain.com
+      secretName: iot-tls
+  rules:
+    - host: your-domain.com
+      http:
+        paths:
+          - path:     /
+            pathType: Prefix
+            backend:
+              service:
+                name: nginx
+                port:
+                  number: 80

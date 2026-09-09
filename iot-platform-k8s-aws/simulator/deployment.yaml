@@ -1,0 +1,66 @@
+#OLD _ nu l-am mai folosit asa, ci direct pe sistem
+
+---
+# Simulator — ruleaza numai in staging/test, nu in productie
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: simulator
+  namespace: iot-platform
+  labels:
+    app: simulator
+    env: test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: simulator
+  template:
+    metadata:
+      labels:
+        app: simulator
+    spec:
+      containers:
+        - name: simulator
+          image: node:20-alpine
+          command: ["node", "/app/index.js"]
+          env:
+            - name: SERVER_URL
+              value: "http://nginx"
+            - name: DEVICE_COUNT
+              value: "100"    # 100 ESP32 simulate
+            - name: INTERVAL_MS
+              value: "5000"
+            - name: API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: iot-secrets
+                  key: SIMULATOR_API_KEYS    # adauga in secrets.yaml
+            - name: SENSOR_IDS
+              valueFrom:
+                secretKeyRef:
+                  name: iot-secrets
+                  key: SIMULATOR_SENSOR_IDS  # adauga in secrets.yaml
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu:    "50m"
+            limits:
+              memory: "256Mi"
+              cpu:    "500m"
+          volumeMounts:
+            - name: code
+              mountPath: /app
+      volumes:
+        - name: code
+          configMap:
+            name: simulator-code
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: simulator-code
+  namespace: iot-platform
+binaryData: {}  # index.js se adauga via kubectl create configmap

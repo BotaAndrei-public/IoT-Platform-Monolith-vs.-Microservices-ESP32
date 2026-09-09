@@ -1,0 +1,33 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-alerts
+  namespace: iot-platform
+  labels:
+    app: worker-alerts
+spec:
+  replicas: 1   # 1 replica — consumer group asigura procesare unica
+  selector:
+    matchLabels:
+      app: worker-alerts
+  template:
+    metadata:
+      labels:
+        app: worker-alerts
+    spec:
+      containers:
+        - name: worker-alerts
+          image: iot-worker-alerts:latest
+          imagePullPolicy: Never
+          envFrom:
+            - secretRef:
+                name: iot-secrets
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu:    "50m"
+            limits:
+              memory: "256Mi"
+              cpu:    "250m"
+      terminationGracePeriodSeconds: 30

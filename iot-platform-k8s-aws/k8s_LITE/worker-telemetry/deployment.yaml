@@ -1,0 +1,55 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-telemetry
+  namespace: iot-platform
+  labels:
+    app: worker-telemetry
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: worker-telemetry
+  template:
+    metadata:
+      labels:
+        app: worker-telemetry
+    spec:
+      containers:
+        - name: worker-telemetry
+          image: iot-worker-telemetry:latest
+          imagePullPolicy: Never
+          envFrom:
+            - secretRef:
+                name: iot-secrets
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu:    "100m"
+            limits:
+              memory: "1Gi"
+              cpu:    "2000m"
+      terminationGracePeriodSeconds: 60
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: worker-telemetry-hpa
+  namespace: iot-platform
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker-telemetry
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+
